@@ -1,0 +1,195 @@
+// package main
+
+// import (
+// 	"encoding/json"
+// 	"fmt"
+// 	"io"
+// 	"log"
+// 	"net/http"
+// 	"os"
+// 	"time"
+
+// 	"github.com/gojek/heimdall/v7/httpclient"
+// 	"github.com/joho/godotenv"
+// 	"github.com/gofiber/fiber/v2"
+// )
+
+// type WeatherResponse struct {
+// 	Temperature struct {
+// 		Degrees float64 `json:"degrees"`
+// 		Unit    string  `json:"unit"`
+// 	} `json:"temperature"`
+// 	Condition struct {
+// 		Description struct {
+// 			Text string `json:"text"`
+// 		} `json:"description"`
+// 	} `json:"weatherCondition"`
+// }
+
+// type GeocodeResponse struct {
+// 	Results []struct {
+// 		Geometry struct {
+// 			Location struct {
+// 				Lat float64 `json:"lat"`
+// 				Lng float64 `json:"lng"`
+// 			} `json:"location"`
+// 		} `json:"geometry"`
+// 	} `json:"results"`
+// }
+
+// type CircuitBreaker struct {
+// 	FailureCount   int
+// 	SuccessCount   int
+// 	FailureLimit   int
+// 	SuccessLimit   int
+// 	LastFailureTime time.Time
+// 	State          string
+// 	Timeout        time.Duration
+// }
+
+// const (
+// 	StateClosed = "closed"
+// 	StateOpen   = "open"
+// 	StateHalfOpen = "half-open"
+// )
+
+// func NewCircuitBreaker(failureLimit, successLimit int, timeout time.Duration) *CircuitBreaker {
+// 	return &CircuitBreaker{
+// 		FailureLimit: failureLimit,
+// 		SuccessLimit: successLimit,
+// 		Timeout:      timeout,
+// 		State:        StateClosed,
+// 	}
+// }
+
+// func (cb *CircuitBreaker) CallAPI(client *httpclient.Client, url string) (*http.Response, error) {
+// 	// Check the current state of the circuit breaker
+// 	if cb.State == StateOpen {
+// 		if time.Since(cb.LastFailureTime) < cb.Timeout {
+// 			return nil, fmt.Errorf("circuit breaker is open, retry later")
+// 		}
+// 		cb.State = StateHalfOpen
+// 	}
+
+// 	resp, err := client.Get(url, nil)
+// 	if err != nil {
+// 		cb.FailureCount++
+// 		if cb.FailureCount >= cb.FailureLimit {
+// 			cb.State = StateOpen
+// 			cb.LastFailureTime = time.Now()
+// 		}
+// 		return nil, err
+// 	}
+
+// 	cb.SuccessCount++
+// 	if cb.SuccessCount >= cb.SuccessLimit {
+// 		cb.State = StateClosed
+// 		cb.FailureCount = 0
+// 		cb.SuccessCount = 0
+// 	}
+
+// 	return resp, nil
+// }
+
+// func getCoordinates(city, apiKey string, client *httpclient.Client, cb *CircuitBreaker) (float64, float64, error) {
+// 	url := fmt.Sprintf("https://maps.googleapis.com/maps/api/geocode/json?address=%s&key=%s", city, apiKey)
+// 	resp, err := cb.CallAPI(client, url)
+// 	if err != nil {
+// 		return 0, 0, err
+// 	}
+// 	defer resp.Body.Close()
+
+// 	body, err := io.ReadAll(resp.Body)
+// 	if err != nil {
+// 		return 0, 0, err
+// 	}
+
+// 	var geocodeResp GeocodeResponse
+// 	if err := json.Unmarshal(body, &geocodeResp); err != nil {
+// 		return 0, 0, err
+// 	}
+
+// 	if len(geocodeResp.Results) == 0 {
+// 		return 0, 0, fmt.Errorf("no results found for city: %s", city)
+// 	}
+
+// 	return geocodeResp.Results[0].Geometry.Location.Lat, geocodeResp.Results[0].Geometry.Location.Lng, nil
+// }
+
+// func getWeather(lat, lon float64, apiKey string, client *httpclient.Client, cb *CircuitBreaker) (*WeatherResponse, error) {
+// 	url := fmt.Sprintf("https://weather.googleapis.com/v1/currentConditions:lookup?key=%s&location.latitude=%f&location.longitude=%f", apiKey, lat, lon)
+
+// 	// Implement circuit breaker logic
+// 	resp, err := cb.CallAPI(client, url)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	defer resp.Body.Close()
+
+// 	body, err := io.ReadAll(resp.Body)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	var weatherResponse WeatherResponse
+// 	if err := json.Unmarshal(body, &weatherResponse); err != nil {
+// 		return nil, err
+// 	}
+
+// 	return &weatherResponse, nil
+// }
+
+// func main() {
+// 	// Load .env file for API key
+// 	if err := godotenv.Load(); err != nil {
+// 		log.Fatal("Error loading .env file")
+// 	}
+
+// 	apiKey := os.Getenv("GOOGLE_API_KEY")
+// 	if apiKey == "" {
+// 		log.Fatal("API key not found in environment variables")
+// 	}
+
+// 	// Create the Heimdall client
+// 	client := httpclient.NewClient(
+// 		httpclient.WithHTTPTimeout(5 * time.Second), // Timeout for each request
+// 	)
+
+// 	// Initialize the circuit breaker
+// 	cb := NewCircuitBreaker(3, 2, 10*time.Second) // 3 failures in 10 seconds opens the circuit
+
+// 	// Create a new Fiber app
+// 	app := fiber.New()
+
+// 	// /weather route that processes city input and returns weather data
+// 	app.Post("/weather", func(c *fiber.Ctx) error {
+// 		var body map[string]string
+// 		if err := c.BodyParser(&body); err != nil {
+// 			return c.Status(fiber.StatusBadRequest).SendString("Invalid input")
+// 		}
+
+// 		city := body["city"]
+
+// 		// Get coordinates for the city
+// 		latitude, longitude, err := getCoordinates(city, apiKey, client, cb)
+// 		if err != nil {
+// 			return c.Status(fiber.StatusInternalServerError).SendString("Failed to get coordinates")
+// 		}
+
+// 		// Get weather data using coordinates
+// 		weather, err := getWeather(latitude, longitude, apiKey, client, cb)
+// 		if err != nil {
+// 			return c.Status(fiber.StatusInternalServerError).SendString("Failed to fetch weather data")
+// 		}
+
+// 		// Return weather data as JSON response
+// 		return c.JSON(fiber.Map{
+// 			"city":        city,
+// 			"temperature": weather.Temperature.Degrees,
+// 			"condition":   weather.Condition.Description.Text,
+// 		})
+// 	})
+
+// 	// Start the Fiber app
+// 	log.Fatal(app.Listen(":3000"))
+// }
